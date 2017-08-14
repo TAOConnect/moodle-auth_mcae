@@ -245,4 +245,136 @@ class auth_plugin_mcae extends auth_plugin_manual {
 
     }
 
+    /**
+     * Gets a list of the current cohorts for this user
+     * This is a convenience function for the dashboard code, to build an array 
+     * of cohorts that a user WOULD be in for a particular set of profile fields
+     *
+     * @param object $user user object, later used for $USER
+     * @param string $username (with system magic quotes)
+     * @param string $password plain text password (with system magic quotes)
+     */
+    public function get_cohorts_for_user(&$user, $username, $groupid, $isselfhelp) {
+        global $DB, $SESSION;
+
+        $context = context_system::instance();
+        $uid = $user->id;
+        // Ignore users from don't_touch list.
+        $ignore = explode(",", $this->config->donttouchusers);
+
+        if (!empty($ignore) AND array_search($username, $ignore) !== false) {
+            return NULL;
+        };
+
+        // Ignore guests.
+        if (isguestuser($user)) {
+            return NULL;
+        };
+
+        // Get COHORTS data.
+        $clause = array('contextid' => $context->id);
+        if ($this->config->enableunenrol == 1) {
+            $clause['component'] = self::COMPONENT_NAME;
+        };
+
+        $cohorts = $DB->get_records('cohort', $clause);
+
+        $cohortslist = array();
+        foreach ($cohorts as $cohort) {
+            $cid = $cohort->id;
+            $cname = format_string($cohort->name);
+            $cohortslist[$cid] = $cname;
+        }
+
+        // Load the proper profile fields for the group passed in for this user
+        profile_load_non_assignable_fields($user);
+        load_tao_user_assignments($user, $groupid, $isselfhelp);
+
+        // Get advanced user data.
+        // profile_load_data($user);
+        // profile_load_custom_fields($user);
+        $userprofiledata = mcae_prepare_profile_data($user, $this->config->secondrule_fld);
+
+        // Additional values for email.
+        list($emailusername, $emaildomain) = explode("@", $userprofiledata['email']);
+
+        // Email root domain.
+        $emaildomainarray = explode('.', $emaildomain);
+        if (count($emaildomainarray) > 2) {
+            $emailrootdomain = $emaildomainarray[count($emaildomainarray) - 2].'.'.
+                               $emaildomainarray[count($emaildomainarray) - 1];
+        } else {
+            $emailrootdomain = $emaildomain;
+        }
+        $userprofiledata['email'] = array(
+            'full' => $userprofiledata['email'],
+            'username' => $emailusername,
+            'domain' => $emaildomain,
+            'rootdomain' => $emailrootdomain
+        );
+
+        // Delimiter.
+        $delimiter = $this->config->delim;
+        $delim = strtr($delimiter, array('CR+LF' => chr(13).chr(10), 'CR' => chr(13), 'LF' => chr(10)));
+
+        // Calculate a cohort names for user.
+        $replacementstemplate = $this->config->replace_arr;
+
+        $replacements = array();
+        if (!empty($replacementstemplate)) {
+            $replacementsarray = explode($delim, $replacementstemplate);
+            foreach ($replacementsarray as $replacement) {
+                list($key, $val) = explode("|", $replacement);
+                $replacements[$key] = $val;
+            };
+        };
+
+        // Generate cohorts array.
+        $mainrule = $this->config->mainrule_fld;
+
+        $mainrulearray = array();
+        $templates = array();
+        if (!empty($mainrule)) {
+            $mainrulearray = explode($delim, $mainrule);
+        } else {
+            return NULL; // Empty mainrule.
+        };
+
+        // Find %split function.
+        foreach ($mainrulearray as $item) {
+            if (preg_match('/(?<full>%split\((?<fld>\w*)\|(?<delim>.{1,5})\))/', $item, $splitparams)) {
+                // Split!
+                $splitted = explode($splitparams['delim'], $userprofiledata[$splitparams['fld']]);
+                foreach ($splitted as $key => $val) {
+                    $userprofiledata[$splitparams['fld']."_$key"] = $val;
+                    $templates[] = strtr($item, array("{$splitparams['full']}" => "{{ ".$splitparams['fld']."_$key }}"));
+                }
+            } else {
+                $templates[] = $item;
+            }
+        }
+
+        $processed = array();
+        $user_cohorts = array();
+
+        // Process templates with Mustache.
+        foreach ($templates as $cohort) {
+            $cohortname = $this->mustache->render($cohort, $userprofiledata);
+            $cohortname = (!empty($replacements)) ? strtr($cohortname, $replacements) : $cohortname;
+
+            if ($cohortname == '') {
+                continue; // We don't want an empty cohort name.
+            };
+
+            $cid = array_search($cohortname, $cohortslist);
+            if ($cid !== false) {
+                $user_cohorts[] = $cid;
+            }
+            $processed[] = $cid;
+        };
+
+        return $user_cohorts;
+
+    }
+
 }
